@@ -1,10 +1,10 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useForm, Controller } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import * as z from 'zod'
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
@@ -15,15 +15,17 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Loader2 } from 'lucide-react'
 
 interface FormField {
-  label: string
-  name: string
-  type: string
-  variant: string
-  required: boolean
-  placeholder?: string
-  disabled?: boolean
   checked?: boolean
   description?: string
+  disabled?: boolean
+  label: string
+  name: string
+  placeholder?: string
+  required: boolean
+  rowIndex: number
+  type: string
+  value?: string
+  variant: string
 }
 
 interface FormData {
@@ -43,29 +45,37 @@ const fetchFormConfig = async (): Promise<FormField[]> => {
 
   return [
     {
+      checked: true,
+      description: data.body,
+      disabled: false,
       label: data.title,
-      name: 'name_8066616423',
-      type: 'text',
-      variant: 'Input',
+      name: "name_8066616423",
+      placeholder: "ahaden",
       required: true,
-      placeholder: 'Enter your name',
-      description: data.body
+      rowIndex: 0,
+      type: "text",
+      value: "",
+      variant: "Input"
     },
     {
-      label: 'Age',
-      name: 'age_12345',
-      type: 'number',
-      variant: 'Input',
+      label: "Age",
+      name: "age_12345",
+      placeholder: "Enter your age",
       required: true,
-      placeholder: 'Enter your age'
+      rowIndex: 1,
+      type: "number",
+      value: "",
+      variant: "Input"
     },
     {
-      label: 'Agree to terms',
-      name: 'terms_001',
-      type: 'checkbox',
-      variant: 'Checkbox',
+      label: "Agree to terms",
+      name: "terms_001",
+      checked: false,
       required: true,
-      checked: false
+      rowIndex: 2,
+      type: "checkbox",
+      value: "",
+      variant: "Checkbox"
     }
   ]
 }
@@ -84,19 +94,44 @@ const submitFormData = async (data: FormData) => {
   return response.json()
 }
 
+const autoSaveFormData = async (data: FormData) => {
+  // Simulate API call for auto-saving
+  await new Promise(resolve => setTimeout(resolve, 500))
+  return data
+}
+
 export default function DynamicForm() {
   const [interactionCount, setInteractionCount] = useState(0)
   const [submissionId, setSubmissionId] = useState<number | null>(null)
+  const [optimisticSubmission, setOptimisticSubmission] = useState(false)
+  const queryClient = useQueryClient()
 
   const { data: formFields, isLoading, error } = useQuery({
     queryKey: ['formConfig'],
     queryFn: fetchFormConfig,
+    staleTime: 1000 * 60 * 5, // 5 minutes
+    gcTime: 1000 * 60 * 30, // 30 minutes
   })
 
   const mutation = useMutation({
     mutationFn: submitFormData,
+    onMutate: () => {
+      setOptimisticSubmission(true)
+    },
     onSuccess: (data) => {
       setSubmissionId(data.id)
+      setOptimisticSubmission(false)
+      queryClient.invalidateQueries({ queryKey: ['formConfig'] })
+    },
+    onError: () => {
+      setOptimisticSubmission(false)
+    },
+  })
+
+  const autoSaveMutation = useMutation({
+    mutationFn: autoSaveFormData,
+    onSuccess: (data) => {
+      console.log('Auto-saved:', data)
     },
   })
 
@@ -113,21 +148,44 @@ export default function DynamicForm() {
     }, {}) || {}
   )
 
-  const { control, handleSubmit, reset, watch } = useForm<FormData>({
+  const { control, handleSubmit, reset, watch, formState: { errors, isDirty } } = useForm<FormData>({
     resolver: zodResolver(schema),
+    mode: 'onChange', // Enable inline validation
   })
 
+  const formValues = watch()
   const age = watch('age_12345')
+
+  useEffect(() => {
+    if (isDirty) {
+      const timer = setTimeout(() => {
+        autoSaveMutation.mutate(formValues)
+      }, 2000)
+
+      return () => clearTimeout(timer)
+    }
+  }, [formValues, isDirty, autoSaveMutation])
 
   const onSubmit = (data: FormData) => {
     mutation.mutate(data)
   }
 
   const handleReset = () => {
-    reset()
+    const defaultValues = formFields?.reduce((acc: FormData, field) => {
+      acc[field.name] = field.value || field.checked || ''
+      return acc
+    }, {})
+    reset(defaultValues)
     setInteractionCount(0)
     setSubmissionId(null)
+    setOptimisticSubmission(false)
   }
+
+  useEffect(() => {
+    if (formFields) {
+      handleReset()
+    }
+  }, [formFields])
 
   if (isLoading) return (
     <div className="flex justify-center items-center h-screen">
@@ -146,7 +204,7 @@ export default function DynamicForm() {
     <Card className="max-w-2xl mx-auto mt-8">
       <CardHeader>
         <CardTitle>Dynamic Form</CardTitle>
-        <CardDescription>Please fill out the form below</CardDescription>
+        <CardDescription>Please fill out the form below with your information</CardDescription>
       </CardHeader>
       <CardContent>
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
@@ -159,7 +217,7 @@ export default function DynamicForm() {
               <Controller
                 name={field.name}
                 control={control}
-                defaultValue={field.checked || ''}
+                defaultValue={field.value || field.checked || ''}
                 render={({ field: { onChange, value, ...rest }, fieldState: { error } }) => {
                   switch (field.variant) {
                     case 'Input':
@@ -175,7 +233,7 @@ export default function DynamicForm() {
                               onChange(field.type === 'number' ? parseInt(e.target.value) : e.target.value)
                               setInteractionCount((prev) => prev + 1)
                             }}
-                            className="w-full"
+                            className={`w-full ${error ? 'border-red-500' : ''}`}
                           />
                           {error && <p className="text-destructive text-sm mt-1">{error.message}</p>}
                         </>
@@ -216,7 +274,10 @@ export default function DynamicForm() {
                 defaultValue=""
                 render={({ field }) => (
                   <Select
-                    onValueChange={field.onChange}
+                    onValueChange={(value) => {
+                      field.onChange(value)
+                      setInteractionCount((prev) => prev + 1)
+                    }}
                     defaultValue={typeof field.value === 'string' ? field.value : ''}
                   >
                     <SelectTrigger className="w-full">
@@ -250,14 +311,21 @@ export default function DynamicForm() {
           </Button>
         </div>
         <p className="text-sm text-muted-foreground">Interaction count: {interactionCount}</p>
-        {submissionId && (
-          <Alert>
-            <AlertTitle>Success</AlertTitle>
-            <AlertDescription>Form submitted successfully! Submission ID: {submissionId}</AlertDescription>
+        {autoSaveMutation.isPending && (
+          <p className="text-sm text-muted-foreground">Auto-saving...</p>
+        )}
+        {(optimisticSubmission || submissionId) && (
+          <Alert className="bg-green-50 border-green-200">
+            <AlertTitle className="text-green-800">Success</AlertTitle>
+            <AlertDescription className="text-green-700">
+              {optimisticSubmission 
+                ? 'Form submitted successfully! Waiting for server confirmation...'
+                : `Form submitted successfully! Your submission ID is: ${submissionId}`
+              }
+            </AlertDescription>
           </Alert>
         )}
       </CardFooter>
     </Card>
   )
 }
-
